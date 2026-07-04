@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+nul
+*_task7.*
+*_task3.*
+*_output*
