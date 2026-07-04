@@ -1,259 +1,305 @@
 # RCU — Robot-Cloud-User Triangle Pub/Sub Mesh
 
+**Zero-broker, direct peer-to-peer pub/sub mesh for controlling robots in real time.** Cloud handles discovery only — every byte of sensor data, status, and command flows directly between peers over ZMQ.
+
+---
+
+## Quick Start
+
+```bash
+# Terminal 1
+export RCU_SECRET=my-secret
+python -m cloud_service
+
+# Terminal 2
+export RCU_SECRET=my-secret
+python -m robot robot-1
+
+# Terminal 3
+export RCU_SECRET=my-secret
+python -m user
+```
+
+Then in the User CLI:
+```
+> list
+> connect robot-1
+> send forward
+> send stop
+```
+
+---
+
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        CONTROL PLANE (REQ/REP)                   │
-│                                                                  │
-│   Robot ──REGISTER/HEARTBEAT──▶ Cloud                           │
-│   User  ──LIST/CONNECT───────▶ Cloud                           │
-└─────────────────────────────────────────────────────────────────┘
-
-                    ┌──────────┐
-                    │  Cloud   │  (control plane only)
-                    └────┬─────┘
-                         │ spawns
+                    ┌──────────┐           CONTROL PLANE (REQ/REP)
+                    │  Cloud   │           ───────────────────────
+                    └────┬─────┘           Robot → Cloud: REGISTER, HEARTBEAT
+                         │                 User  → Cloud: LIST, CONNECT
                     ┌────▼─────┐
-                    │  Player  │  (subprocess)
+                    │  Player  │           Cloud spawns a Player per connected robot
                     └────┬─────┘
                          │
-    ┌────────────────────┼────────────────────┐
-    │                    │                    │
-    ▼                    ▼                    ▼
- ┌──────┐           ┌────────┐           ┌──────┐
- │ Robot│◄─────────►│ Player │◄─────────►│ User │
- │ PUB  │   DATA    │  PUB   │   DATA    │ PUB  │
- │ SUB  │   PLANE   │  SUB   │   PLANE   │ SUB  │
- └──────┘  PUB/SUB  └────────┘  PUB/SUB  └──────┘
-
-  Data-plane: triangular brokerless PUB/SUB mesh
-  Control-plane: Cloud-mediated REQ/REP (not in data path)
+     ┌───────────────────┼───────────────────┐
+     │                   │                   │
+     ▼                   ▼                   ▼
+  ┌──────┐          ┌────────┐          ┌──────┐
+  │ Robot│◄────────►│ Player │◄────────►│ User │
+  │ PUB  │   DATA   │  PUB   │   DATA   │ PUB  │
+  │ SUB  │   PLANE  │  SUB   │   PLANE  │ SUB  │
+  └──────┘  PUB/SUB └────────┘  PUB/SUB └──────┘
 ```
 
-Each entity binds one PUB socket (its broadcast address) and opens SUB sockets
-directly connecting to the other two peers' PUB addresses. Cloud is only in the
-control path — it mediates discovery but never touches data messages.
+**Two planes, one triangle:**
+
+| Plane | Transport | What flows |
+|---|---|---|
+| **Control** | ZMQ REQ/REP | Registration, heartbeats, discovery |
+| **Data** | ZMQ PUB/SUB | Sensor readings, commands, status, processed data |
+
+Cloud never touches a data message. It mediates discovery, then gets out of the way.
+
+---
+
+## How It Works
+
+### Discovery flow
+
+```
+┌──────┐                  ┌───────┐                  ┌──────┐
+│ User │                  │ Cloud │                  │Robot │
+└──┬───┘                  └───┬───┘                  └──┬───┘
+   │                          │                         │
+   │                          │◄──── REGISTER ──────────│
+   │                          │──── pub_port + ────────►│
+   │                          │     push_port           │
+   │                          │                         │
+   │── LIST_ROBOTS ──────────►│                         │
+   │◄──── robots[] ──────────│                         │
+   │                          │                         │
+   │── CONNECT_ROBOT ───────►│                         │
+   │                          │── PUSH mesh_info ──────►│  (dedicated PUSH/PULL)
+   │                          │                         │  (no heartbeat wait)
+   │◄── robot/player addrs ──│                         │
+   │                          │                         │
+   │◄═══════════ PUB/SUB mesh ─════════════════════════►│  (direct, no Cloud)
+```
+
+### Data flow
+
+```
+Robot PUB ──sensor─────▶ Player SUB ──processed──▶ User SUB
+    │                                                   
+    │────status────────▶ User SUB                      
+    │                   Player SUB                     
+    │                                                   
+User PUB ──command────▶ Robot SUB                      
+                        Player SUB                     
+```
+
+---
 
 ## How to Run
 
-### Step 0 — Set the shared secret
+### 1. Set the shared secret
 
-All four processes need the same `RCU_SECRET` environment variable. Run this in
-**every terminal** before starting the respective process:
+Every terminal needs `RCU_SECRET` set before starting:
 
-**Linux / macOS:**
+**Linux / macOS**
 ```bash
 export RCU_SECRET=my-secret-value
 ```
 
-**Windows (cmd.exe):**
+**Windows (cmd)**
 ```cmd
 set RCU_SECRET=my-secret-value
 ```
 
-**Windows (PowerShell):**
+**Windows (PowerShell)**
 ```powershell
 $env:RCU_SECRET = "my-secret-value"
 ```
 
-The process will refuse to start if `RCU_SECRET` is not set. Use any value you
-choose — it is checked on all control-plane requests to prevent unauthorized
-registrations or connections.
+The process will refuse to start without it.
 
----
+### 2. Start the Cloud
 
-Open **4 terminal windows**:
-
-### Terminal 1 — Cloud Service
 ```bash
 python -m cloud_service
 ```
 
-### Terminal 2 — Robot
+Cloud binds its control-plane REP socket on `tcp://127.0.0.1:5555` and waits.
+
+### 3. Start a Robot
+
 ```bash
 python -m robot robot-1
 ```
 
-### Terminal 3 — Robot (optional, second robot)
+Robot registers, binds PUB + PULL, starts heartbeats and sensor publishing, then waits for a User to connect.
+
+You can add more robots:
 ```bash
 python -m robot robot-2
 ```
 
-### Terminal 4 — User CLI
+### 4. Start the User CLI
+
 ```bash
 python -m user
 ```
 
-### Demo Flow
+### Demo walkthrough
 
-1. **Terminal 1**: Cloud starts, waits for requests.
-2. **Terminal 2**: Robot registers, starts heartbeats & publishing sensor data.
-3. **Terminal 4 (User CLI)**:
-   ```
-   > list
-   Online robots (1):
-     robot-1 — tcp://127.0.0.1:6000
-   > connect robot-1
-   Connected to robot 'robot-1'
-   [RECV] robot/robot-1/processed: {"state": 50.0, "status": "normal", ...}
-   > send forward
-   Sent command 'forward' to robot-1
-   [RECV] robot/robot-1/status: {"command": "forward", "state": 55.0, ...}
-   > quit
-   ```
-4. **Terminal 2**: Shows sensor publishes, received commands, and executed SDK actions.
+```
+> list
+Online robots (1):
+  robot-1 — tcp://127.0.0.1:6000
 
-The triangle mesh forms automatically when `connect` is issued:
-- Cloud spawns a Player subprocess.
-- Robot receives mesh info immediately via a dedicated ZMQ PUSH/PULL channel (no heartbeat wait), opens SUBs to Player & User.
-- User opens SUBs to Robot & Player.
-- All three are now directly connected — Cloud is out of the data path.
+> connect robot-1
+Connected to robot 'robot-1'
+  Robot PUB:   tcp://127.0.0.1:6000
+  Player PUB:  tcp://127.0.0.1:6003
+  My PUB port: 6002
+Robot ready — you can send commands.
+
+> send forward
+Sent command 'forward' to robot-1
+[RECV] robot/robot-1/status: {'command': 'forward', 'state': 55.0, ...}
+
+> send stop
+Sent command 'stop' to robot-1
+[RECV] robot/robot-1/status: {'command': 'stop', 'state': 50.0, ...}
+
+> quit
+```
+
+---
 
 ## Topics
 
-| Topic Pattern | Publisher | Subscribers | Payload |
+| Topic | Publisher | Subscribers | Payload |
 |---|---|---|---|
-| `robot/<id>/sensor` | Robot | Player | `{"robot_id": ..., "state": <float>, "timestamp": ...}` |
-| `robot/<id>/command` | User | Robot, Player | `{"robot_id": ..., "command": "forward", "timestamp": ...}` |
-| `robot/<id>/status` | Robot | User, Player | `{"robot_id": ..., "command": ..., "state": ..., "timestamp": ...}` |
-| `robot/<id>/processed` | Player | User | `{"robot_id": ..., "state": ..., "status": "normal"|"warning", "timestamp": ...}` |
+| `robot/<id>/sensor` | Robot | Player | `state`, `timestamp` |
+| `robot/<id>/command` | User | Robot, Player | `command`, `timestamp` |
+| `robot/<id>/status` | Robot | User, Player | `command`, `state`, `timestamp` |
+| `robot/<id>/processed` | Player | User | `state`, `status`, `timestamp` |
 
 All messages are ZMQ multipart: frame 0 = topic string (utf-8), frame 1 = JSON payload (utf-8).
 
-### Example Messages
-
-**Sensor** (`robot/robot-1/sensor`):
+### Example: sensor
 ```json
 {"robot_id": "robot-1", "state": 52.3, "timestamp": 1712345678.901}
 ```
 
-**Command** (`robot/robot-1/command`):
+### Example: command
 ```json
 {"robot_id": "robot-1", "command": "forward", "timestamp": 1712345679.123}
 ```
 
-**Status** (`robot/robot-1/status`):
+### Example: status
 ```json
 {"robot_id": "robot-1", "command": "forward", "state": 57.3, "timestamp": 1712345679.124}
 ```
 
-**Processed** (`robot/robot-1/processed`):
+### Example: processed
 ```json
 {"robot_id": "robot-1", "state": 52.3, "status": "normal", "timestamp": 1712345678.902}
 ```
 
+---
+
+## Design Decisions
+
+### Mesh info delivery: PUSH/PULL, not heartbeat piggyback
+
+Originally, mesh info was attached to the heartbeat response. That meant Robot's SUB sockets didn't open until the next heartbeat tick — up to 2 seconds of dropped commands. Now Cloud pushes mesh info over a dedicated ZMQ PUSH/PULL channel the instant CONNECT_ROBOT fires. Heartbeats are liveness-only.
+
+### Ready signal: retry-publish, no magic sleep
+
+Robot publishes `__ready__` up to 10 times (100ms apart) after opening its SUB sockets, because ZMQ's async SUB connect means the first publish often lands on no one. The User CLI waits up to 1.5s for it with a clear timeout warning. No arbitrary `time.sleep` on the critical path.
+
+### Authentication
+
+A shared secret (`RCU_SECRET`) gates every control-plane request. It's required — no fallback, no default. All three processes must agree on the same value. Next step would be per-robot API keys + TLS.
+
+---
+
 ## Assumptions
 
-- **All processes run on localhost.** IPs are hardcoded as `127.0.0.1` throughout.
-  In production, Cloud would resolve hostnames/addresses from the REGISTER payload.
-- **Port allocation is a simple incrementing counter.** No port reuse or garbage
-  collection. Starting at `BASE_PUB_PORT` (6000) and counting up. The Cloud control
-  port is fixed at 5555.
-- **No message persistence or replay.** ZMQ PUB/SUB delivers messages to
-  subscribers connected at publish time. Late subscribers don't receive past
-  messages — this is a known ZMQ limitation and accepted as out of scope.
-- **Mesh info is delivered instantly via a dedicated PUSH/PULL channel, not
-  piggybacked on heartbeats.** When a User connects, Cloud opens a PUSH socket
-  connected to Robot's PULL (`push_port`) and pushes the mesh info immediately.
-  This avoids the ~2s command-loss window that would exist if Robot had to wait
-  for its next heartbeat response. Heartbeats remain for liveness detection only.
-- **Robot publishes a `__ready__` status once its SUB sockets are open.** User
-  CLI waits up to 1.5s for this signal before printing a readiness confirmation.
-  If the signal is missed (e.g. due to ZMQ's first-pub-loss), a warning is shown
-  but commands are still sent and will be delivered once the SUB connection
-  completes asynchronously.
-- **Duplicate `robot_id` while online → rejection.** A robot reconnecting after
-  being marked offline (heartbeat timeout) may re-register freely.
-- **`protocol.py` and `logger.py` are duplicated** in each of the three packages
-  (`cloud_service/`, `robot/`, `user/`). This is an explicit tradeoff (~30 lines × 3)
-  to respect the required folder structure without a `shared/` package.
-- **Heartbeat timeout is 5 seconds**, with heartbeats sent every 2 seconds.
-  This gives 2–3 missed heartbeats before the robot is marked offline.
-- **Player processes are killed via SIGTERM** when a robot goes offline or Cloud
-  shuts down. If SIGTERM doesn't work within 5 seconds, SIGKILL is used.
-- **Ctrl+C on any process** triggers cleanup via signal handlers. ZMQ sockets
-  and contexts are closed with `linger=0` to avoid hangs.
+| # | Assumption |
+|---|---|
+| 1 | **All processes on localhost.** IPs hardcoded as `127.0.0.1`. In production, Cloud resolves the REGISTER address. |
+| 2 | **Port allocation = incrementing counter.** Starts at 6000, counts up. No reuse, no GC. Control port fixed at 5555. |
+| 3 | **No message persistence/replay.** ZMQ PUB/SUB delivers to connected subscribers only. Late joiners get nothing — accepted tradeoff. |
+| 4 | **Duplicate robot_id while online → rejected.** Offline robots may re-register freely. |
+| 5 | **protocol.py and logger.py are duplicated** 3× (~30 lines each). Explicit tradeoff to avoid a `shared/` package. |
+| 6 | **Heartbeat timeout = 5s**, sent every 2s (2–3 missed → offline). |
+| 7 | **Player killed via SIGTERM → SIGKILL** after 5s if unresponsive. |
 
-## Running Tests
+---
+
+## Tests
 
 ```bash
 # Unit tests (registry)
 python -m pytest cloud_service/test_registry.py -v
 
-# Integration test (cloud + robot + user in-process)
+# Integration test (in-process cloud + robot + user)
 python -m pytest test_integration.py -v -s
 ```
 
-## Running Benchmark
+## Benchmark
 
 ```bash
 python benchmark_latency.py --count 100
 ```
 
-## Security (Bonus)
-
-A shared-secret token (`SHARED_SECRET` in `protocol.py`) is checked on all
-control-plane requests (`REGISTER` and `CONNECT_ROBOT`). Requests without a
-valid token are rejected with an error message.
-
-In production, the next steps would be:
-- TLS/mTLS on all ZMQ sockets (both control-plane REQ/REP and data-plane PUB/SUB).
-- Per-robot API keys instead of a single shared secret.
-- Certificate-based authentication for robot identity.
-- The shared secret should come from an environment variable or a secrets manager,
-  not from source code.
-
-## Scalability (Bonus — Written Design, Not Implemented)
-
-To scale this system to N robots and M users:
-
-1. **Registry**: Replace the in-memory `dict` with Redis or Postgres. This allows
-   multiple Cloud instances to share state. TTL-based expiry (Redis `EXPIRE`)
-   would replace the background monitor thread.
-2. **Port allocation**: Move to a proper port allocation service or use a
-   single well-known PUB port per entity (relying on ZMQ's ability to have
-   multiple subscribers on one port). Alternatively, use a relay/proxy pattern
-   instead of direct mesh connections.
-3. **Cloud horizontal scaling**: Cloud instances would sit behind a discovery
-   layer (e.g., consistent hash ring or a simple load balancer). Robots connect
-   to any Cloud instance; the registry backend ensures consistency.
-4. **Connection limits**: With N robots and M users, each entity opens N-1+M
-   SUB sockets. At large scale, this becomes unwieldy. A forwarder/relay
-   process (per-robot or per-group) would reduce the connection fan-out.
-5. **Player scaling**: Each robot gets one Player. At scale, Players could be
-   pooled and multiplexed, or the processing logic could be moved to a stream
-   processor (e.g., Kafka Streams, Flink) that subscribes to all sensor topics.
+---
 
 ## Project Structure
 
 ```
-repo/
-├── cloud_service/
-│   ├── __init__.py
-│   ├── __main__.py          # python -m cloud_service
-│   ├── logger.py            # shared (duplicated)
-│   ├── player.py            # subprocess entry point
-│   ├── player_manager.py    # spawn/kill Player subprocesses
-│   ├── protocol.py          # shared (duplicated)
-│   ├── registry.py          # thread-safe in-memory registry
-│   ├── server.py            # ZMQ REP loop
-│   └── test_registry.py     # unit tests
-├── robot/
-│   ├── __init__.py
-│   ├── __main__.py          # python -m robot [robot_id]
-│   ├── logger.py            # shared (duplicated)
-│   ├── protocol.py          # shared (duplicated)
-│   ├── robot_client.py      # main robot client
-│   └── robot_sdk.py         # fake JetBot SDK
-├── user/
-│   ├── __init__.py
-│   ├── __main__.py          # python -m user
-│   ├── logger.py            # shared (duplicated)
-│   ├── protocol.py          # shared (duplicated)
-│   └── user_cli.py          # REPL CLI
-├── test_integration.py      # root-level integration test
-├── benchmark_latency.py     # root-level latency benchmark
+.
+├── cloud_service/        # Cloud control plane + Player subprocess
+│   ├── server.py         #   ZMQ REP loop — REGISTER, HEARTBEAT, LIST, CONNECT
+│   ├── registry.py       #   Thread-safe in-memory robot registry
+│   ├── player.py         #   Subprocess: subscribes sensor, publishes processed
+│   ├── player_manager.py #   Spawn/kill Player lifecycle
+│   ├── protocol.py       #   Shared constants, topic helpers (duplicated)
+│   ├── logger.py         #   Shared logging config (duplicated)
+│   └── test_registry.py  #   Unit tests
+├── robot/                # Robot client
+│   ├── robot_client.py   #   Registration, mesh join, command execution
+│   ├── robot_sdk.py      #   Fake JetBot SDK (forward/backward/left/right/stop)
+│   ├── protocol.py       #   Byte-identical copy
+│   └── logger.py         #   Byte-identical copy
+├── user/                 # User CLI
+│   ├── user_cli.py       #   REPL: list, connect, send, quit
+│   ├── protocol.py       #   Byte-identical copy
+│   └── logger.py         #   Byte-identical copy
+├── test_integration.py   # Integration test
+├── benchmark_latency.py  # Latency benchmark
 ├── requirements.txt
 └── README.md
 ```
+
+---
+
+## Scaling (Design Notes)
+
+To go from localhost to N robots and M users:
+
+1. **Registry** → Redis/Postgres with TTL expiry (replaces in-memory `dict` + monitor thread).
+2. **Port allocation** → Single well-known per-entity port, or a relay proxy.
+3. **Cloud HA** → Stateless Cloud instances behind a discovery layer; shared registry backend.
+4. **Connection fan-out** → Each entity opens N+M SUB sockets. At scale, add a forwarder per group.
+5. **Player scaling** → Pooled Players or stream processor (Kafka Streams, Flink).
+
+---
+
+## Security
+
+- `RCU_SECRET` env var gates every control-plane request.
+- Next: TLS/mTLS on all sockets, per-robot API keys, certificate-based identity.
