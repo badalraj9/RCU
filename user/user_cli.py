@@ -9,6 +9,7 @@ Commands:
 
 import shlex
 import signal
+import sys
 import threading
 import time
 from typing import Optional
@@ -123,7 +124,7 @@ class UserCLI:
         print(f"Sent command '{command}' to {self._connected_robot}")
 
     def _print_subscriber(self) -> None:
-        """Continuously print incoming subscribed messages."""
+        """Continuously print incoming subscribed messages to stderr (keeps input() prompt clean)."""
         while not self._stop_event.is_set():
             try:
                 socks = dict(self._poller.poll(timeout=500))
@@ -136,7 +137,7 @@ class UserCLI:
                     continue
                 topic = decode_topic(topic_str)
                 payload = decode_payload(payload_bytes)
-                print(f"[RECV] {topic}: {payload}")
+                print(f"[RECV] {topic}: {payload}", file=sys.stderr)
 
                 # Detect Robot's "ready" signal
                 if (topic == topic_status(self._connected_robot)
