@@ -137,7 +137,10 @@ class UserCLI:
                     continue
                 topic = decode_topic(topic_str)
                 payload = decode_payload(payload_bytes)
-                print(f"[RECV] {topic}: {payload}", file=sys.stderr)
+                # Only print status messages (command results, __ready__) to stderr;
+                # sensor/processed are too noisy for the interactive REPL.
+                if topic == topic_status(self._connected_robot):
+                    print(f"[RECV] {topic}: {payload}", file=sys.stderr)
 
                 # Detect Robot's "ready" signal
                 if (topic == topic_status(self._connected_robot)
