@@ -124,7 +124,7 @@ class UserCLI:
         print(f"Sent command '{command}' to {self._connected_robot}")
 
     def _print_subscriber(self) -> None:
-        """Continuously print incoming subscribed messages to stderr (keeps input() prompt clean)."""
+        """Silently consume incoming messages (no print spam)."""
         while not self._stop_event.is_set():
             try:
                 socks = dict(self._poller.poll(timeout=500))
@@ -137,12 +137,8 @@ class UserCLI:
                     continue
                 topic = decode_topic(topic_str)
                 payload = decode_payload(payload_bytes)
-                # Only print status messages (command results, __ready__) to stderr;
-                # sensor/processed are too noisy for the interactive REPL.
-                if topic == topic_status(self._connected_robot):
-                    print(f"[RECV] {topic}: {payload}", file=sys.stderr)
 
-                # Detect Robot's "ready" signal
+                # Detect Robot's "ready" signal (silent — no print)
                 if (topic == topic_status(self._connected_robot)
                         and payload.get("command") == "__ready__"):
                     self._robot_ready.set()
