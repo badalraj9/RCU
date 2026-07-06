@@ -116,11 +116,10 @@ class RobotClient:
         logger.info("Robot SUB -> User at %s", user_addr)
         self._subs_open = True
 
-        # Retry-publish "ready" status: ZMQ PUB has no ack and the first
-        # publish is often lost when the receiver's SUB connect hasn't
-        # completed asynchronously.  We send up to 10 times (100ms apart)
-        # to give the subscriber window a chance to open.  The receiver
-        # (User CLI) also waits with a timeout, so this is belt-and-suspenders.
+        # Publish "ready" status: ZMQ PUB has no ack and the first publish
+        # is sometimes lost if the receiver's SUB connect hasn't completed.
+        # We send twice (50ms apart) as a lightweight hedge.  The receiver
+        # (User CLI) waits with a timeout, so this is belt-and-suspenders.
         if self._pub_sock is not None:
             ready_payload = {
                 "robot_id": self.robot_id,
@@ -129,10 +128,10 @@ class RobotClient:
                 "timestamp": time.time(),
             }
             msg = encode_msg(topic_status(self.robot_id), ready_payload)
-            for _ in range(10):
-                self._pub_sock.send_multipart(msg)
-                time.sleep(0.1)
-            logger.info("Robot published %s (ready signal, 10×)", topic_status(self.robot_id))
+            self._pub_sock.send_multipart(msg)
+            time.sleep(0.05)
+            self._pub_sock.send_multipart(msg)
+            logger.info("Robot published %s (ready signal)", topic_status(self.robot_id))
 
     def _sensor_loop(self) -> None:
         while not self._stop_event.is_set():
