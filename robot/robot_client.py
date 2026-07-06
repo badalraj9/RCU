@@ -145,6 +145,19 @@ class RobotClient:
                 self._pub_sock.send_multipart(msg)
             time.sleep(SENSOR_INTERVAL_S)
 
+    @staticmethod
+    def _levenshtein(a: str, b: str) -> int:
+        n, m = len(a), len(b)
+        dp = list(range(m + 1))
+        for i in range(1, n + 1):
+            prev = dp[0]
+            dp[0] = i
+            for j in range(1, m + 1):
+                cost = 0 if a[i - 1] == b[j - 1] else 1
+                tmp = min(dp[j] + 1, dp[j - 1] + 1, prev + cost)
+                prev, dp[j] = dp[j], tmp
+        return dp[m]
+
     def _execute_command(self, payload: dict) -> None:
         command = payload.get("command", "")
         logger.info("Executing command: %s", command)
@@ -155,7 +168,18 @@ class RobotClient:
             "right": self.sdk.right,
             "stop": self.sdk.stop,
         }
+        resolved = command
         method = cmd_map.get(command)
+        if method is None:
+            # Fuzzy match: find closest known command within 2 edits
+            closest, dist = min(
+                ((c, self._levenshtein(command, c)) for c in cmd_map),
+                key=lambda x: x[1],
+            )
+            if dist <= 2:
+                logger.info("Fuzzy matched '%s' → '%s' (distance %d)", command, closest, dist)
+                resolved = closest
+                method = cmd_map[closest]
         if method is None:
             logger.warning("Unknown command: %s", command)
             return
@@ -163,7 +187,7 @@ class RobotClient:
         if self._pub_sock is not None:
             status_payload = {
                 "robot_id": self.robot_id,
-                "command": command,
+                "command": resolved,
                 "state": self.sdk.current_state,
                 "timestamp": time.time(),
             }
